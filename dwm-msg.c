@@ -1,3 +1,4 @@
+#include <getopt.h>
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -181,22 +182,33 @@ write_socket(const void *buf, size_t count)
   return written;
 }
 
-static void
-connect_to_socket()
+int
+connect_to_socket(const char *socket_path)
 {
   struct sockaddr_un addr;
 
   int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (sock == -1) {
+    fprintf(stderr, "Could not create socket");
+    exit(EXIT_FAILURE);
+  }
 
   // Initialize struct to 0
   memset(&addr, 0, sizeof(struct sockaddr_un));
 
   addr.sun_family = AF_UNIX;
-  strcpy(addr.sun_path, DEFAULT_SOCKET_PATH);
+  if (socket_path != NULL) {
+    strcpy(addr.sun_path, socket_path);
+  } else {
+    strcpy(addr.sun_path, DEFAULT_SOCKET_PATH);
+  }
 
-  connect(sock, (const struct sockaddr *)&addr, sizeof(struct sockaddr_un));
+  if (connect(sock, (const struct sockaddr *)&addr, sizeof(struct sockaddr_un)) < 0) {
+    close(sock);
+    return -1;
+  }
 
-  sock_fd = sock;
+  return sock;
 }
 
 static int
@@ -491,58 +503,98 @@ int
 main(int argc, char *argv[])
 {
   const char *prog_name = argv[0];
+  int o, option_index = 0;
+  char *socket_path = NULL;
+  int monitor = 0;
+  IPCMessageType message_type = IPC_TYPE_RUN_COMMAND;
 
-  connect_to_socket();
+  static struct option long_options[] = {
+    {"socket", required_argument, 0, 's'},
+    {"type", required_argument, 0, 't'},
+    {"version", no_argument, 0, 'v'},
+    {"ignore-reply", no_argument, 0, 'i'},
+    {"monitor", no_argument, 0, 'm'},
+    {"help", no_argument, 0, 'h'},
+    {0, 0, 0, 0}};
+
+  char *options_string = "+s:t:him";
+
+  while ((o = getopt_long(argc, argv, options_string, long_options, &option_index)) != -1) {
+    if (o == 's') {
+      free(socket_path);
+      socket_path = strdup(optarg);
+    } else if (o == 't') {
+      if (strcasecmp(optarg, "command") == 0) {
+        message_type = IPC_TYPE_RUN_COMMAND;
+      } else if (strcasecmp(optarg, "run_command") == 0) {
+        message_type = IPC_TYPE_RUN_COMMAND;
+      } else if (strcasecmp(optarg, "get_monitors") == 0) {
+        message_type = IPC_TYPE_GET_MONITORS;
+      } else if (strcasecmp(optarg, "get_tags") == 0) {
+        message_type = IPC_TYPE_GET_TAGS;
+      } else if (strcasecmp(optarg, "get_layouts") == 0) {
+        message_type = IPC_TYPE_GET_LAYOUTS;
+      } else if (strcasecmp(optarg, "get_dwm_client") == 0) {
+        message_type = IPC_TYPE_GET_DWM_CLIENT;
+      } else if (strcasecmp(optarg, "subscribe") == 0) {
+        message_type = IPC_TYPE_SUBSCRIBE;
+      } else
+        usage_error(prog_name, "Unknown message type (known types: command, get_monitors, get_tags, get_layouts, get_dwm_client, subscribe)");
+    } else if (o == 'i') {
+      ignore_reply = 1;
+    } else if (o == 'm') {
+      monitor = 1;
+    } else if (o == 'h') {
+      print_usage(prog_name);
+      return 0;
+    } else if (o == '?') {
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  if (monitor && message_type != IPC_TYPE_SUBSCRIBE)
+    usage_error(prog_name, "The monitor option -m is used with \"-t subscribe\" exclusively.");
+
+  sock_fd = connect_to_socket(socket_path);
   if (sock_fd == -1) {
     fprintf(stderr, "Failed to connect to socket\n");
     return 1;
   }
 
-  int i = 1;
-  if (i < argc && strcmp(argv[i], "--ignore-reply") == 0) {
-    ignore_reply = 1;
-    i++;
-  }
-
-  if (i >= argc) usage_error(prog_name, "Expected an argument, got none");
-
-  if (strcmp(argv[i], "help") == 0)
-    print_usage(prog_name);
-  else if (strcmp(argv[i], "run_command") == 0) {
-    if (++i >= argc) usage_error(prog_name, "No command specified");
+  if (message_type == IPC_TYPE_RUN_COMMAND) {
+    if (optind >= argc) usage_error(prog_name, "No command specified");
     // Command name
-    char *command = argv[i];
+    char *command = argv[optind];
     // Command arguments are everything after command name
-    char **command_args = argv + ++i;
+    char **command_args = argv + ++optind;
     // Number of command arguments
-    int command_argc = argc - i;
+    int command_argc = argc - optind;
     run_command(command, command_args, command_argc);
-  } else if (strcmp(argv[i], "get_monitors") == 0) {
+  } else if (message_type == IPC_TYPE_GET_MONITORS) {
     get_monitors();
-  } else if (strcmp(argv[i], "get_tags") == 0) {
+  } else if (message_type == IPC_TYPE_GET_TAGS) {
     get_tags();
-  } else if (strcmp(argv[i], "get_layouts") == 0) {
+  } else if (message_type == IPC_TYPE_GET_LAYOUTS) {
     get_layouts();
-  } else if (strcmp(argv[i], "get_dwm_client") == 0) {
-    if (++i < argc) {
-      if (is_unsigned_int(argv[i])) {
-        Window win = atol(argv[i]);
+  } else if (message_type == IPC_TYPE_GET_DWM_CLIENT) {
+  if (optind < argc) {
+      if (is_unsigned_int(argv[optind])) {
+        Window win = atol(argv[optind]);
         get_dwm_client(win);
       } else
         usage_error(prog_name, "Expected unsigned integer argument");
     } else
       usage_error(prog_name, "Expected the window id");
-  } else if (strcmp(argv[i], "subscribe") == 0) {
-    if (++i < argc) {
-      for (int j = i; j < argc; j++) subscribe(argv[j]);
+  } else if (message_type == IPC_TYPE_SUBSCRIBE) {
+    if (optind < argc) {
+      for (int j = optind; j < argc; j++) subscribe(argv[j]);
     } else
       usage_error(prog_name, "Expected event name");
     // Keep listening for events forever
-    while (1) {
+    do {
       print_socket_reply();
-    }
-  } else
-    usage_error(prog_name, "Invalid argument '%s'", argv[i]);
+    } while (monitor);
+  }
 
   return 0;
 }
