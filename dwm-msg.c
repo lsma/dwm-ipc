@@ -1,5 +1,6 @@
 #include <getopt.h>
 #include <ctype.h>
+#include <err.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdarg.h>
@@ -43,6 +44,8 @@
     yajl_gen_map_close(gen);                                                   \
   }
 
+const char *prog_name;
+
 typedef unsigned long Window;
 
 const char *DEFAULT_SOCKET_PATH = "/tmp/dwm.sock";
@@ -66,6 +69,7 @@ typedef struct dwm_ipc_header {
   uint8_t type;
 } __attribute((packed)) dwm_ipc_header_t;
 
+
 static int
 recv_message(uint8_t *msg_type, uint32_t *reply_size, uint8_t **reply)
 {
@@ -80,16 +84,14 @@ recv_message(uint8_t *msg_type, uint32_t *reply_size, uint8_t **reply)
 
     if (n == 0) {
       if (read_bytes == 0) {
-        fprintf(stderr, "Unexpectedly reached EOF while reading header.");
-        fprintf(stderr,
-                "Read %" PRIu32 " bytes, expected %" PRIu32 " total bytes.\n",
-                read_bytes, to_read);
+        warnx("Unexpectedly reached EOF while reading header.");
+        warnx("Read %" PRIu32 " bytes, expected %" PRIu32 " total bytes.",
+              read_bytes, to_read);
         return -2;
       } else {
-        fprintf(stderr, "Unexpectedly reached EOF while reading header.");
-        fprintf(stderr,
-                "Read %" PRIu32 " bytes, expected %" PRIu32 " total bytes.\n",
-                read_bytes, to_read);
+        warnx("Unexpectedly reached EOF while reading header.");
+        warnx("Read %" PRIu32 " bytes, expected %" PRIu32 " total bytes.",
+              read_bytes, to_read);
         return -3;
       }
     } else if (n == -1) {
@@ -101,8 +103,8 @@ recv_message(uint8_t *msg_type, uint32_t *reply_size, uint8_t **reply)
 
   // Check if magic string in header matches
   if (memcmp(walk, IPC_MAGIC, IPC_MAGIC_LEN) != 0) {
-    fprintf(stderr, "Invalid magic string. Got '%.*s', expected '%s'\n",
-            IPC_MAGIC_LEN, walk, IPC_MAGIC);
+    warnx("Invalid magic string. Got '%.*s', expected '%s'",
+         IPC_MAGIC_LEN, walk, IPC_MAGIC);
     return -3;
   }
 
@@ -124,9 +126,9 @@ recv_message(uint8_t *msg_type, uint32_t *reply_size, uint8_t **reply)
     ssize_t n = read(sock_fd, *reply + read_bytes, *reply_size - read_bytes);
 
     if (n == 0) {
-      fprintf(stderr, "Unexpectedly reached EOF while reading payload.");
-      fprintf(stderr, "Read %" PRIu32 " bytes, expected %" PRIu32 " bytes.\n",
-              read_bytes, *reply_size);
+      warnx("Unexpectedly reached EOF while reading payload.");
+      warnx("Read %" PRIu32 " bytes, expected %" PRIu32 " bytes.",
+            read_bytes, *reply_size);
       free(*reply);
       return -2;
     } else if (n == -1) {
@@ -153,8 +155,7 @@ read_socket(IPCMessageType *msg_type, uint32_t *msg_size, char **msg)
       // Try again (non-fatal error)
       if (ret == -1 && (errno == EINTR || errno == EAGAIN)) continue;
 
-      fprintf(stderr, "Error receiving response from socket. ");
-      fprintf(stderr, "The connection might have been lost.\n");
+      err(EXIT_FAILURE, "Error receiving response from socket. The connection might have been lost.");
       exit(2);
     }
   }
@@ -189,8 +190,7 @@ connect_to_socket(const char *socket_path)
 
   int sock = socket(AF_UNIX, SOCK_STREAM, 0);
   if (sock == -1) {
-    fprintf(stderr, "Could not create socket");
-    exit(EXIT_FAILURE);
+    err(EXIT_FAILURE, "Could not create socket");
   }
 
   // Initialize struct to 0
@@ -453,37 +453,38 @@ subscribe(const char *event)
 }
 
 static void
-usage_error(const char *prog_name, const char *format, ...)
+usage_error(const char *format, ...)
 {
   va_list args;
   va_start(args, format);
 
-  fprintf(stderr, "Error: ");
-  vfprintf(stderr, format, args);
-  fprintf(stderr, "\nusage: %s <command> [...]\n", prog_name);
+  if (format)
+    vwarnx(format, args);
+  fprintf(stderr, "usage: %s <command> [...]\n", prog_name);
   fprintf(stderr, "Try '%s help'\n", prog_name);
 
   va_end(args);
-  exit(1);
+  exit(EXIT_FAILURE);
 }
 
 static void
-print_usage(const char *name)
+print_usage()
 {
-  printf("usage: %s [options] <command> [...]\n", name);
+  printf("usage: %s [-s <socket>] [-i] [-m] [-t <command>] <message>\n", prog_name);
+  puts("Communicate with DWM, the suckless window manager.");
   puts("");
   puts("Commands:");
-  puts("  run_command <name> [args...]    Run an IPC command");
+  puts("  -t run_command <name> [args...] Run an IPC command");
   puts("");
-  puts("  get_monitors                    Get monitor properties");
+  puts("  -t get_monitors                 Get monitor properties");
   puts("");
-  puts("  get_tags                        Get list of tags");
+  puts("  -t get_tags                     Get list of tags");
   puts("");
-  puts("  get_layouts                     Get list of layouts");
+  puts("  -t get_layouts                  Get list of layouts");
   puts("");
-  puts("  get_dwm_client <window_id>      Get dwm client proprties");
+  puts("  -t get_dwm_client <window_id>   Get dwm client proprties");
   puts("");
-  puts("  subscribe [events...]           Subscribe to specified events");
+  puts("  -t subscribe [events...]        Subscribe to specified events");
   puts("                                  Options: " IPC_EVENT_TAG_CHANGE ",");
   puts("                                  " IPC_EVENT_LAYOUT_CHANGE ",");
   puts("                                  " IPC_EVENT_CLIENT_FOCUS_CHANGE ",");
@@ -491,18 +492,21 @@ print_usage(const char *name)
   puts("                                  " IPC_EVENT_FOCUSED_TITLE_CHANGE ",");
   puts("                                  " IPC_EVENT_FOCUSED_STATE_CHANGE);
   puts("");
-  puts("  help                            Display this message");
-  puts("");
-  puts("Options:");
-  puts("  --ignore-reply                  Don't print reply messages from");
-  puts("                                  run_command and subscribe.");
+  puts("Other options:");
+  puts("  -h, --help                      Display this message");
+  puts("  -i, --ignore-reply              Don't print \"success\" reply messages from");
+  puts("                                    run_command and subscribe.");
+  puts("  -m, --monitor                   Use with the subscribe command to keep");
+  puts("                                    listening for dwm events instead of exiting");
+  puts("                                    immediately after recieving a reply (which");
+  puts("                                    is thedefault behavior)."); 
   puts("");
 }
 
 int
 main(int argc, char *argv[])
 {
-  const char *prog_name = argv[0];
+  prog_name = argv[0];
   int o, option_index = 0;
   char *socket_path = NULL;
   int monitor = 0;
@@ -511,7 +515,6 @@ main(int argc, char *argv[])
   static struct option long_options[] = {
     {"socket", required_argument, 0, 's'},
     {"type", required_argument, 0, 't'},
-    {"version", no_argument, 0, 'v'},
     {"ignore-reply", no_argument, 0, 'i'},
     {"monitor", no_argument, 0, 'm'},
     {"help", no_argument, 0, 'h'},
@@ -539,13 +542,13 @@ main(int argc, char *argv[])
       } else if (strcasecmp(optarg, "subscribe") == 0) {
         message_type = IPC_TYPE_SUBSCRIBE;
       } else
-        usage_error(prog_name, "Unknown message type (known types: command, get_monitors, get_tags, get_layouts, get_dwm_client, subscribe)");
+        usage_error("Unknown message type (known types: command, get_monitors, get_tags, get_layouts, get_dwm_client, subscribe)");
     } else if (o == 'i') {
       ignore_reply = 1;
     } else if (o == 'm') {
       monitor = 1;
     } else if (o == 'h') {
-      print_usage(prog_name);
+      print_usage();
       return 0;
     } else if (o == '?') {
       exit(EXIT_FAILURE);
@@ -553,16 +556,16 @@ main(int argc, char *argv[])
   }
 
   if (monitor && message_type != IPC_TYPE_SUBSCRIBE)
-    usage_error(prog_name, "The monitor option -m is used with \"-t subscribe\" exclusively.");
+    usage_error("The monitor option -m is used with \"-t subscribe\" exclusively.");
 
   sock_fd = connect_to_socket(socket_path);
   if (sock_fd == -1) {
-    fprintf(stderr, "Failed to connect to socket\n");
+    err(EXIT_FAILURE, "Failed to connect to socket");
     return 1;
   }
 
   if (message_type == IPC_TYPE_RUN_COMMAND) {
-    if (optind >= argc) usage_error(prog_name, "No command specified");
+    if (optind >= argc) usage_error("No command specified");
     // Command name
     char *command = argv[optind];
     // Command arguments are everything after command name
@@ -582,14 +585,14 @@ main(int argc, char *argv[])
         Window win = atol(argv[optind]);
         get_dwm_client(win);
       } else
-        usage_error(prog_name, "Expected unsigned integer argument");
+        usage_error("Expected unsigned integer argument");
     } else
-      usage_error(prog_name, "Expected the window id");
+      usage_error("Expected the window id");
   } else if (message_type == IPC_TYPE_SUBSCRIBE) {
     if (optind < argc) {
       for (int j = optind; j < argc; j++) subscribe(argv[j]);
     } else
-      usage_error(prog_name, "Expected event name");
+      usage_error("Expected event name");
     // Keep listening for events forever
     do {
       print_socket_reply();
